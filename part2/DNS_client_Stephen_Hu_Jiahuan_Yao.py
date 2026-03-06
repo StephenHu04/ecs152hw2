@@ -4,27 +4,27 @@ import time
 import sys
 import random
 
-# Root nameserver IPs (a-root through m-root)
+# Root nameserver IPs(a root through m-root-servers.net)
 ROOT_SERVERS = [
-    "198.41.0.4",      # a.root-servers.net
-    "170.247.170.2",   # b.root-servers.net
-    "192.33.4.12",     # c.root-servers.net
-    "199.7.91.13",     # d.root-servers.net
-    "192.203.230.10",  # e.root-servers.net
-    "192.5.5.241",     # f.root-servers.net
-    "192.112.36.4",    # g.root-servers.net
-    "198.97.190.53",   # h.root-servers.net
-    "192.36.148.17",   # i.root-servers.net
-    "192.58.128.30",   # j.root-servers.net
-    "193.0.14.129",    # k.root-servers.net
-    "199.7.83.42",     # l.root-servers.net
-    "202.12.27.33",    # m.root-servers.net
+    "198.41.0.4",
+    "170.247.170.2",
+    "192.33.4.12",
+    "199.7.91.13",
+    "192.203.230.10",
+    "192.5.5.241",
+    "192.112.36.4",
+    "198.97.190.53",
+    "192.36.148.17",
+    "192.58.128.30",
+    "193.0.14.129",
+    "199.7.83.42",
+    "202.12.27.33",
 ]
 
 DNS_PORT = 53
 TIMEOUT = 10
 
-# DNS record type codes
+# DNS mapping of type codes to names for parsing
 RECORD_TYPES = {
     1:   "A",
     2:   "NS",
@@ -45,6 +45,7 @@ def build_dns_query(domain):
     qdcount = 1             # One question
     ancount = arcount = nscount = 0
 
+    # header section (12 bytes for id, flags, counts etc.)
     header = struct.pack(">HHHHHH",
                          transaction_id, flags,
                          qdcount, ancount, nscount, arcount)
@@ -56,57 +57,58 @@ def build_dns_query(domain):
         qname += struct.pack("B", len(encoded)) + encoded
     qname += b"\x00"  # Terminate with null byte
 
-    qtype  = struct.pack(">H", 1)   # A record
-    qclass = struct.pack(">H", 1)   # IN (Internet)
+    qtype  = struct.pack(">H", 1)   # query type A (host address)
+    qclass = struct.pack(">H", 1)   # query class IN (internet)
 
     return header + qname + qtype + qclass, transaction_id
 
-
+# DNS name parsing with support for compression (pointers)
 def parse_name(data, offset):
     """Parse a (possibly compressed) DNS name from packet data."""
     labels = []
-    visited = set()
+    visited = set()     # To prevent infinite loops in case of malformed packets
 
     while True:
         if offset >= len(data):
             break
         length = data[offset]
 
-        # Pointer compression: top 2 bits are 11
+        # check for pointer (compression)
         if (length & 0xC0) == 0xC0:
             if offset + 1 >= len(data):
                 break
             pointer = ((length & 0x3F) << 8) | data[offset + 1]
             if pointer in visited:
-                break  # Avoid infinite loop
+                break
             visited.add(pointer)
+            # Recursively parse the name at the pointer location
             name, _ = parse_name(data, pointer)
             labels.append(name)
             offset += 2
             break
-        elif length == 0:
+        elif length == 0:   # End of name
             offset += 1
             break
-        else:
+        else:               # Regular label
             offset += 1
             labels.append(data[offset:offset + length].decode(errors="replace"))
             offset += length
 
     return ".".join(labels), offset
 
-
+# Main DNS response parsing function
 def parse_dns_response(data):
     """Parse a full DNS response packet. Returns (answer_records, authority_records, additional_records, header_info)."""
     if len(data) < 12:
         return [], [], [], {}
-
+    # Unpack header
     tid, flags, qdcount, ancount, nscount, arcount = struct.unpack(">HHHHHH", data[:12])
     offset = 12
 
     # Skip question section
     for _ in range(qdcount):
         _, offset = parse_name(data, offset)
-        offset += 4  # qtype + qclass
+        offset += 4  #skip qtype + qclass
 
     answer_records = []
     authority_records = []
@@ -124,6 +126,7 @@ def parse_dns_response(data):
             offset += rdlength
 
             type_name = RECORD_TYPES.get(rtype, f"TYPE{rtype}")
+            # decode actual rdata based on type
             value = parse_rdata(rtype, rdata, data, offset - rdlength)
             section_list.append((type_name, name, value))
 
@@ -140,34 +143,35 @@ def parse_dns_response(data):
     }
     return answer_records, authority_records, additional_records, header_info
 
-
+# parsing rdata based on record type
 def parse_rdata(rtype, rdata, full_packet, rdata_offset):
     """Decode rdata based on record type."""
-    if rtype == 1:  # A
+    if rtype == 1:  # A record
         if len(rdata) == 4:
             return ".".join(str(b) for b in rdata)
-    elif rtype == 28:  # AAAA
+    elif rtype == 28:  # AAAA record
         if len(rdata) == 16:
             groups = struct.unpack(">8H", rdata)
             return ":".join(f"{g:04x}" for g in groups)
-    elif rtype in (2, 5, 12):  # NS, CNAME, PTR
+    elif rtype in (2, 5, 12):  # NS, CNAME, PTR records
         name, _ = parse_name(full_packet, rdata_offset)
         return name
-    elif rtype == 15:  # MX
+    elif rtype == 15:  # MX record
         pref = struct.unpack(">H", rdata[:2])[0]
         name, _ = parse_name(full_packet, rdata_offset + 2)
         return f"{pref} {name}"
-    elif rtype == 6:  # SOA
+    elif rtype == 6:  # SOA record
         name, _ = parse_name(full_packet, rdata_offset)
         return name
-    elif rtype == 16:  # TXT
+    elif rtype == 16:  # TXT record
         return rdata[1:].decode(errors="replace")
     return rdata.hex()
 
-
+# send a DNS query to a server and return the parsed response and RTT
 def send_dns_query(server_ip, domain):
     """Send a DNS query and return (answer_records, authority_records, additional_records, rtt_ms)."""
     query, _ = build_dns_query(domain)
+    # using Socket with UDP for DNS query
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(TIMEOUT)
 
@@ -182,7 +186,7 @@ def send_dns_query(server_ip, domain):
     answer, authority, additional, _ = parse_dns_response(response)
     return answer, authority, additional, rtt
 
-
+# resolve domain iteratively starting from root servers, following referrals until we get an A record answer or fail
 def resolve(domain):
     """
     Iteratively resolve domain starting from a root server.
@@ -205,7 +209,7 @@ def resolve(domain):
             answer, authority, additional, rtt = send_dns_query(current_server, domain)
         except socket.timeout:
             print(f"Timeout querying {current_server}, trying next root server...")
-            # Try next root server
+            # Try next root server if available, otherwise fail
             for rs in ROOT_SERVERS:
                 if rs not in visited_servers:
                     current_server = rs
@@ -263,7 +267,7 @@ def resolve(domain):
 
         current_server = next_server
 
-
+# helper to resolve NS hostname using root servers (for missing glue)
 def resolve_ns(ns_name):
     """Resolve an NS hostname using the root servers (helper for missing glue)."""
     for root in ROOT_SERVERS:
@@ -276,13 +280,14 @@ def resolve_ns(ns_name):
             continue
     return None
 
-
+# make a raw HTTP/1.1 GET request to the resolved IP and print status line and RTT
 def make_http_request(ip, domain):
     """Make a raw HTTP/1.1 GET request to the resolved IP."""
     print("--------------------------------------------")
     print(f"Making HTTP request to {ip}")
     print("--------------------------------------------")
-
+ 
+    # raw HTTP request string with Host header and Connection: close
     request = (
         f"GET / HTTP/1.1\r\n"
         f"Host: {domain}\r\n"
@@ -290,6 +295,7 @@ def make_http_request(ip, domain):
         f"\r\n"
     )
 
+    # Use TCP socket for HTTP request
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(TIMEOUT)
 
@@ -298,6 +304,7 @@ def make_http_request(ip, domain):
         t_start = time.time()
         sock.sendall(request.encode())
 
+        # receive first chunk to get HTTP status line
         response = b""
         while True:
             chunk = sock.recv(4096)
@@ -322,6 +329,7 @@ def make_http_request(ip, domain):
 
 
 def main():
+    # Check command line arguments
     if len(sys.argv) < 2:
         print("Usage: python DNS_client_name1_name2.py <domain>")
         sys.exit(1)
@@ -329,6 +337,7 @@ def main():
     domain = sys.argv[1]
     resolved_ip = resolve(domain)
 
+    # If we got an IP address, make the HTTP request; otherwise, print an error message
     if resolved_ip:
         make_http_request(resolved_ip, domain)
     else:
