@@ -303,10 +303,10 @@ def make_http_request(ip, domain):
             chunk = sock.recv(4096)
             if not chunk:
                 break
-            response += chunk
+            response += chunk 
             # Stop after headers to avoid downloading huge body
             if b"\r\n\r\n" in response:
-                break
+                 break
 
         rtt = (time.time() - t_start) * 1000
     except Exception as e:
