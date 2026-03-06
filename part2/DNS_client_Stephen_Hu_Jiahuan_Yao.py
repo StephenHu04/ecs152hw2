@@ -332,7 +332,7 @@ def main():
     if resolved_ip:
         make_http_request(resolved_ip, domain)
     else:
-        print(f"Could not resolve {domain}")
+        print(f"Could not resolve {domain}") 
 
 
 if __name__ == "__main__":
