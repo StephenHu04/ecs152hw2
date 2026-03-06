@@ -330,7 +330,6 @@ def main():
     resolved_ip = resolve(domain)
 
     if resolved_ip:
-        print(f"\nResolved {domain} -> {resolved_ip}\n")
         make_http_request(resolved_ip, domain)
     else:
         print(f"Could not resolve {domain}")

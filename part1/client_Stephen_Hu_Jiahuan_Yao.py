@@ -5,7 +5,7 @@ import sys
 PROXY_HOST = '127.0.0.1'
 PROXY_PORT = 8000
 
-SERVER_IP = '127.0.0.1'
+SERVER_IP = '10.0.0.1'
 SERVER_PORT = 7000
 
 def main():
